@@ -1,8 +1,14 @@
 const { Telegraf } = require('telegraf');
 const http = require('http');
 
-// 1. Initialize Telegram Bot
-const bot = new Telegraf(process.env.BOT_TOKEN);
+// 1. Initialize Telegram Bot safely
+const BOT_TOKEN = process.env.BOT_TOKEN;
+if (!BOT_TOKEN) {
+  console.error("CRITICAL ERROR: BOT_TOKEN environment variable is missing!");
+  process.exit(1);
+}
+
+const bot = new Telegraf(BOT_TOKEN);
 let users = {};
 
 bot.start((ctx) => {
@@ -13,7 +19,7 @@ bot.start((ctx) => {
 
 bot.command('wallet', (ctx) => {
   const id = ctx.chat.id;
-  const text = ctx.message.text;
+  const text = ctx.message.text || "";
   const args = text.split(" ").slice(1).join(" ");
   if (!args) return ctx.reply("⚠️ Usage: /wallet <address>");
   
@@ -24,7 +30,7 @@ bot.command('wallet', (ctx) => {
 
 bot.command('mine', (ctx) => {
   const id = ctx.chat.id;
-  const text = ctx.message.text;
+  const text = ctx.message.text || "";
   const args = text.split(" ").slice(1)[0];
   const points = parseInt(args);
   if (isNaN(points)) return ctx.reply("⚠️ Usage: /mine <points>");
@@ -40,9 +46,12 @@ bot.command('balance', (ctx) => {
   ctx.reply(`📊 Balance:\nPoints: ${u.balance}\nWallet: ${u.wallet || "not set"}`);
 });
 
-bot.launch().then(() => console.log("Telegram Bot engine successfully mounted!"));
+// Start the bot engine
+bot.launch()
+  .then(() => console.log("Telegram Bot engine successfully mounted!"))
+  .catch((err) => console.error("Bot launch failed:", err));
 
-// 2. Simple HTTP Server to keep Render Happy & Awake
+// 2. Simple HTTP Server to keep Render Happy
 const server = http.createServer((req, res) => {
   res.writeHead(200, { 'Content-Type': 'text/plain' });
   res.end('Bot Status: Online and Active\n');
