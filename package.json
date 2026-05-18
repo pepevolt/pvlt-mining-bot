@@ -1,20 +1,15 @@
 {
-"name":"pvlt-mining-server",
-"version":"1.0.0",
-"main":"server.js",
-"scripts":{
-"start":"node server.js"
-},
-"dependencies":{
-"cors":"^2.8.5",
-"dotenv":"^16.4.5",
-"express":"^4.19.2",
-"node-telegram-bot-api":"^0.66.0"
-}
-}
-
-{
-  "amount": 250000000000000000000,
-  "nonce": 123456,
-  "signature": "0xabc..."
+  "name": "pvlt-server",
+  "version": "1.0.0",
+  "main": "server.js",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.18.3",
+    "ethers": "^6.13.1"
+  }
 }
