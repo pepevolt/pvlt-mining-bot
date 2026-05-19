@@ -27,34 +27,68 @@ process.env.PRIVATE_KEY,
 provider
 );
 
-const abi = [
+/* ================= CONTRACTS ================= */
+
+const pvltgAbi = [
 "function mint(address to,uint256 amount) external"
 ];
 
-const gameContract =
+const gameAbi = [
+"function swapPVLTGtoPVLT(uint256 amount) external"
+];
+
+const pvltg =
 new ethers.Contract(
 process.env.PVLTG,
-abi,
+pvltgAbi,
 wallet
 );
 
-/* ================= USER ================= */
+const gameEngine =
+new ethers.Contract(
+process.env.ENGINE,
+gameAbi,
+wallet
+);
+
+/* ================= HEALTH ================= */
+
+app.get("/",(req,res)=>{
+
+res.send("PVLT SERVER RUNNING");
+
+});
+
+/* ================= CREATE USER ================= */
 
 app.post("/user",(req,res)=>{
 
 const { wallet } = req.body;
 
+if(!wallet){
+
+return res.json({
+error:"Wallet required"
+});
+}
+
 if(!users[wallet]){
 
 users[wallet] = {
+
 points:0,
+
 energy:50,
+
 pvltg:0,
-lastClaim:0
+
+lastRefill:Date.now()
+
 };
 }
 
 res.json(users[wallet]);
+
 });
 
 /* ================= TAP ================= */
@@ -65,24 +99,60 @@ const { wallet } = req.body;
 
 const user = users[wallet];
 
-if(!user)
+if(!user){
+
 return res.json({
 error:"User not found"
 });
+}
 
-if(user.energy <= 0)
+/* ================= AUTO REFILL ================= */
+
+const now = Date.now();
+
+const diff =
+Math.floor(
+(now - user.lastRefill)
+/
+30000
+);
+
+if(diff > 0){
+
+user.energy =
+Math.min(
+50,
+user.energy + diff
+);
+
+user.lastRefill = now;
+}
+
+/* ================= TAP ================= */
+
+if(user.energy <= 0){
+
 return res.json({
 error:"No energy"
 });
+}
 
 user.energy -= 1;
 
 user.points += 1;
 
-res.json(user);
+res.json({
+
+points:user.points,
+
+energy:user.energy,
+
+pvltg:user.pvltg
+
+});
 });
 
-/* ================= REFILL ================= */
+/* ================= BUY ENERGY ================= */
 
 app.post("/refill",(req,res)=>{
 
@@ -90,23 +160,45 @@ const { wallet } = req.body;
 
 const user = users[wallet];
 
-if(!user)
+if(!user){
+
 return res.json({
 error:"User not found"
 });
+}
+
+/* ================= ADD ENERGY ================= */
 
 user.energy += 50;
 
-res.json(user);
+if(user.energy > 500){
+
+user.energy = 500;
+}
+
+res.json({
+
+energy:user.energy
+
+});
 });
 
-/* ================= POINTS → PVLTG ================= */
+/* ================= SWAP POINTS ================= */
 
 app.post("/swap-points",(req,res)=>{
 
 const { wallet } = req.body;
 
 const user = users[wallet];
+
+if(!user){
+
+return res.json({
+error:"User not found"
+});
+}
+
+/* ================= RULE ================= */
 
 if(user.points < 10000){
 
@@ -115,16 +207,23 @@ error:"Need 10000 points"
 });
 }
 
+/* ================= CONVERT ================= */
+
 const earned =
-Math.floor(user.points / 10000);
+Math.floor(
+user.points / 10000
+);
 
 user.points = 0;
 
 user.pvltg += earned;
 
 res.json({
+
 success:true,
+
 pvltg:user.pvltg
+
 });
 });
 
@@ -138,12 +237,23 @@ const { wallet } = req.body;
 
 const user = users[wallet];
 
-if(user.pvltg < 1){
+if(!user){
 
 return res.json({
-error:"No PVLTG"
+error:"User not found"
 });
 }
+
+/* ================= MINIMUM ================= */
+
+if(user.pvltg < 100){
+
+return res.json({
+error:"Need minimum 100 PVLTG"
+});
+}
+
+/* ================= MINT PVLTG ================= */
 
 const amount =
 ethers.utils.parseEther(
@@ -151,18 +261,23 @@ user.pvltg.toString()
 );
 
 const tx =
-await gameContract.mint(
+await pvltg.mint(
 wallet,
 amount
 );
 
 await tx.wait();
 
+/* ================= RESET ================= */
+
 user.pvltg = 0;
 
 res.json({
+
 success:true,
+
 tx:tx.hash
+
 });
 
 }catch(err){
@@ -170,7 +285,7 @@ tx:tx.hash
 console.log(err);
 
 res.json({
-error:"Mint failed"
+error:"Claim failed"
 });
 }
 });
@@ -180,5 +295,9 @@ error:"Mint failed"
 app.listen(
 process.env.PORT || 10000,
 ()=>{
-console.log("PVLT SERVER RUNNING");
+
+console.log(
+"PVLT SERVER RUNNING"
+);
+
 });
