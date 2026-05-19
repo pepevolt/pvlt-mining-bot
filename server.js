@@ -16,7 +16,7 @@ let serverWallet;
 let treasuryContract;
 
 try {
-    provider = new ethers.providers.JsonRpcProvider(process.env.RPC_URL, {
+    provider = new ethers.providers.JsonRpcProvider(process.env.RPC_URL || "https://polygon-rpc.com", {
         chainId: 137,
         name: "polygon"
     });
@@ -27,21 +27,19 @@ try {
             "function processPlayerClaim(address _playerWallet, uint256 _pvltgAmount) external",
             "function purchaseEnergyPack(address _playerWallet) external"
         ];
-        if (process.env.TREASURY_ADDRESS) {
-            treasuryContract = new ethers.Contract(process.env.TREASURY_ADDRESS, treasuryAbi, serverWallet);
-        }
+        // Using your target deployed address baseline fallback
+        const treasuryAddress = process.env.TREASURY_ADDRESS || "0x3FdCE8aB325E03d527605dd2f01730cd981F594F";
+        treasuryContract = new ethers.Contract(treasuryAddress, treasuryAbi, serverWallet);
     }
 } catch (error) {
     console.error("Boot configuration mismatch runtime log:", error.message);
 }
 
-// Energy loop calculations helper
 function updateEnergyRefill(user) {
     const now = Date.now();
     if (user.energy === 0) {
         const elapsedSeconds = Math.floor((now - user.lastEnergyDepleted) / 1000);
         if (elapsedSeconds > 0) {
-            // Cap the automatic restoration exactly to a max window of 20 seconds (20 energy points total)
             const addedEnergy = Math.min(elapsedSeconds, 20);
             user.energy = addedEnergy;
         }
@@ -55,7 +53,7 @@ app.post("/user", (req, res) => {
     const key = wallet.toLowerCase();
     
     if (!users[key]) {
-        users[key] = { points: 265, energy: 9787, pvltg: 0.0, lastEnergyDepleted: Date.now() };
+        users[key] = { points: 0, energy: 20, pvltg: 0.0, lastEnergyDepleted: Date.now() };
     }
     users[key] = updateEnergyRefill(users[key]);
     res.json(users[key]);
@@ -77,7 +75,7 @@ app.post("/tap", (req, res) => {
     }
 
     user.energy -= 1;
-    user.points += 2; // Rule modifier optimization: 1 Tap = 2 Points
+    user.points += 2; 
 
     if (user.energy === 0) {
         user.lastEnergyDepleted = Date.now();
@@ -89,25 +87,26 @@ app.post("/tap", (req, res) => {
 app.post("/buy-energy", async (req, res) => {
     try {
         const { wallet } = req.body;
+        if (!wallet) return res.json({ error: "Wallet target parameter required" });
+        
         const key = wallet.toLowerCase();
         const user = users[key];
         if (!user) return res.json({ error: "User not found" });
-
         if (!treasuryContract) return res.json({ error: "Treasury not loaded on server" });
 
-        console.log(`Processing on-chain purchase of energy for ${key}...`);
+        console.log(`Processing server-signed purchase of energy pack for ${key}...`);
         
-        // Triggers the on-chain transfer of 1000 PVLT from user to treasury
+        // Server wallet signs and triggers the on-chain collection execution safely
         const tx = await treasuryContract.purchaseEnergyPack(key);
         await tx.wait();
 
-        user.energy += 10000; // Adds 10,000 energy points upon block verification confirmation
+        user.energy = 20; // Resets game layout loop state back to max capacity
         user.lastEnergyDepleted = 0; 
         
         res.json({ success: true, energy: user.energy });
     } catch (err) {
         console.error("ENERGY PURCHASE TRANSACTION REVERTED:", err);
-        res.json({ error: "Transaction declined on Polygonscan. Balance modification rejected." });
+        res.json({ error: "Transaction reverted on chain. Energy pack addition canceled." });
     }
 });
 
@@ -117,37 +116,38 @@ app.post("/swap-points", (req, res) => {
     const user = users[key];
     if (!user) return res.json({ error: "Profile missing" });
 
-    // Rule baseline: 2000 points = 4 Game Currency Tokens ($PVLTG)
     if (user.points < 2000) return res.json({ error: "Minimum 2,000 points required to swap" });
 
     const multiplier = Math.floor(user.points / 2000);
     user.points = user.points % 2000;
     user.pvltg += (multiplier * 4);
 
-    res.json({ success: true, pvltg: user.pvltg, remainingPoints: user.points });
+    res.json({ success: true, pvltg: user.pvltg, points: user.points });
 });
 
+// --- MATCHED TO UI TRIGGER ROUTE: /withdraw-pvltg ---
 app.post("/withdraw-pvltg", async (req, res) => {
     try {
         const { wallet } = req.body;
+        if (!wallet) return res.json({ error: "Wallet parameter missing" });
+        
         const key = wallet.toLowerCase();
         const user = users[key];
-
         if (!user) return res.json({ error: "User profile context uninitialized" });
         
-        // Calculation check: Determine expected output payout value
-        const expectedPayout = user.pvltg / 500;
-        if (expectedPayout < 10) return res.json({ error: "Withdrawal quantity below minimum required threshold of 10 PVLT" });
-        if (expectedPayout > 1000) return res.json({ error: "Withdrawal quantity exceeds maximum allowed threshold of 1000 PVLT" });
+        if (user.pvltg <= 0) {
+            return res.json({ error: "No available $PVLTG tokens to claim." });
+        }
 
         const rawBalance = user.pvltg;
         const amountInWei = ethers.utils.parseEther(rawBalance.toString());
 
-        // Process on-chain conversion via Contract 3
+        if (!treasuryContract) return res.json({ error: "Treasury connection offline" });
+
+        console.log(`Executing server reward release to: ${key}...`);
         const tx = await treasuryContract.processPlayerClaim(key, amountInWei);
         await tx.wait();
 
-        // Clear player currency allocations instantly upon block validation logs confirmation
         user.pvltg = 0;
         res.json({ success: true, tx: tx.hash });
 
