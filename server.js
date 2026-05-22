@@ -1,104 +1,370 @@
+/* =========================================================
+   PEPEVOLT SERVER
+========================================================= */
+
 require("dotenv").config();
+
 const express = require("express");
 const cors = require("cors");
-const ethers = require("ethers");
 
-const app = reportMod = express();
+const { ethers } = require("ethers");
+
+const app = express();
 
 app.use(cors());
 app.use(express.json());
 
-// Main database mapping record entries
-const userProgressDatabase = {};
+/* =========================================================
+   ENV
+========================================================= */
 
-let adminWallet;
-let gameContractAdmin;
+const PORT =
+    process.env.PORT || 3000;
+
+const RPC_URL =
+    process.env.RPC_URL;
+
+const PRIVATE_KEY =
+    process.env.PRIVATE_KEY;
+
+const PVLT_ADDRESS =
+    process.env.PVLT_ADDRESS;
+
+const TREASURY_ADDRESS =
+    process.env.TREASURY_ADDRESS;
+
+const GAME_ADDRESS =
+    process.env.GAME_ADDRESS;
+
+/* =========================================================
+   PROVIDER
+========================================================= */
+
+const provider =
+    new ethers.providers.JsonRpcProvider(
+        RPC_URL
+    );
+
+const wallet =
+    new ethers.Wallet(
+        PRIVATE_KEY,
+        provider
+    );
+
+/* =========================================================
+   ABI
+========================================================= */
 
 const GAME_ABI = [
+
+    "function getPlayer(address user) view returns(uint256,uint256,uint256,bool,uint256)",
+
+    "function refillEnergy() external",
+
     "function tap() external",
-    "function gPVLT(address) view returns(uint256)"
+
+    "function buyEnergy() external",
+
+    "function convertPoints() external",
+
+    "function claimRewards() external"
 ];
 
-async function initAdminSyncEngine() {
-    try {
-        if (process.env.PRIVATE_KEY && process.env.GAME_CONTRACT) {
-            const provider = new ethers.providers.JsonRpcProvider("https://polygon-rpc.com");
-            adminWallet = new ethers.Wallet(process.env.PRIVATE_KEY, provider);
-            gameContractAdmin = new ethers.Contract(process.env.GAME_CONTRACT, GAME_ABI, adminWallet);
-            console.log(`Admin node processor running.`);
-        }
-    } catch(e) {
-        console.error("Failed to boot blockchain sync agent:", e);
-    }
-}
-initAdminSyncEngine();
+const TREASURY_ABI = [
 
-app.get("/api/config", (req, res) => {
+    "function treasuryBalance() view returns(uint256)",
+
+    "function totalRevenue() view returns(uint256)",
+
+    "function totalRewardsPaid() view returns(uint256)",
+
+    "function totalBurnedGPVLT() view returns(uint256)",
+
+    "function ownerWithdraw(uint256 amount) external",
+
+    "function emergencyWithdrawAll() external"
+];
+
+const PVLT_ABI = [
+
+    "function balanceOf(address user) view returns(uint256)"
+];
+
+/* =========================================================
+   CONTRACTS
+========================================================= */
+
+const gameContract =
+    new ethers.Contract(
+        GAME_ADDRESS,
+        GAME_ABI,
+        wallet
+    );
+
+const treasuryContract =
+    new ethers.Contract(
+        TREASURY_ADDRESS,
+        TREASURY_ABI,
+        wallet
+    );
+
+const pvltContract =
+    new ethers.Contract(
+        PVLT_ADDRESS,
+        PVLT_ABI,
+        wallet
+    );
+
+/* =========================================================
+   HOME
+========================================================= */
+
+app.get("/", async (req,res) => {
+
     res.json({
-        pvlt: process.env.PVLT_CONTRACT,
-        treasury: process.env.TREASURY_CONTRACT,
-        game: process.env.GAME_CONTRACT
+
+        success:true,
+
+        project:"PEPEVOLT",
+
+        network:"Polygon",
+
+        status:"ONLINE"
     });
 });
 
-app.get("/api/user-stats", (req, res) => {
-    const { address } = req.query;
-    if (!address) return res.status(400).json({ error: "Missing address query locator." });
+/* =========================================================
+   PLAYER DATA
+========================================================= */
 
-    const standardMappingKey = address.toLowerCase();
-    
-    if (!userProgressDatabase[standardMappingKey]) {
-        userProgressDatabase[standardMappingKey] = {
-            energy: 1000,
-            points: 0.0
-        };
-    }
-    res.json(userProgressDatabase[standardMappingKey]);
-});
+app.get("/player/:address",
+async (req,res) => {
 
-app.post("/api/sync-progress", (req, res) => {
-    const { walletAddress, currentPoints, currentEnergy } = req.body;
-    if (!walletAddress) return res.status(400).json({ error: "Invalid tracking payload parameters." });
+    try{
 
-    const standardMappingKey = walletAddress.toLowerCase();
+        const address =
+            req.params.address;
 
-    userProgressDatabase[standardMappingKey] = {
-        energy: parseInt(currentEnergy) || 0,
-        points: parseFloat(currentPoints) || 0.0
-    };
-    res.json({ success: true });
-});
+        const data =
+            await gameContract.getPlayer(
+                address
+            );
 
-// Converts accumulated Points to gPVLT on the contract ledger
-app.post("/api/blockchain-sync", async (req, res) => {
-    const { walletAddress } = req.body;
-    if (!walletAddress) return res.status(400).json({ error: "Missing target address payload." });
+        res.json({
 
-    if (!gameContractAdmin) return res.status(500).json({ error: "Central admin engine module offline." });
+            success:true,
 
-    try {
-        const key = walletAddress.toLowerCase();
-        const localRecord = userProgressDatabase[key] || { energy: 1000, points: 0.0 };
+            energy:
+                Number(data[0]),
 
-        const contractScoreWei = await gameContractAdmin.gPVLT(walletAddress);
-        const contractScore = parseFloat(ethers.utils.formatEther(contractScoreWei));
+            points:
+                Number(data[1]),
 
-        // Sync points gap to on-chain gPVLT ledger entries
-        if (localRecord.points > contractScore) {
-            const gapDifference = Math.floor(localRecord.points - contractScore);
-            console.log(`Writing verification block: syncing ${gapDifference} items for ${walletAddress}`);
+            burnedGPVLT:
+                Number(data[2]),
 
-            for(let i = 0; i < gapDifference; i++) {
-                const tx = await gameContractAdmin.tap({ gasLimit: 120000 });
-                await tx.wait();
-            }
-        }
-        res.json({ success: true });
-    } catch(err) {
-        console.error("Ledger synchronization failure:", err);
-        res.status(500).json({ success: false, error: err.message });
+            paidUser:
+                data[3],
+
+            lastClaimDay:
+                Number(data[4])
+        });
+
+    } catch(err){
+
+        res.status(500).json({
+
+            success:false,
+
+            error:err.message
+        });
     }
 });
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`SERVER DEPLOYED ON PORT ${PORT}`));
+/* =========================================================
+   TREASURY INFO
+========================================================= */
+
+app.get("/treasury",
+async (req,res) => {
+
+    try{
+
+        const balance =
+            await treasuryContract
+            .treasuryBalance();
+
+        const revenue =
+            await treasuryContract
+            .totalRevenue();
+
+        const rewards =
+            await treasuryContract
+            .totalRewardsPaid();
+
+        const burned =
+            await treasuryContract
+            .totalBurnedGPVLT();
+
+        res.json({
+
+            success:true,
+
+            treasuryBalance:
+                ethers.utils.formatEther(
+                    balance
+                ),
+
+            totalRevenue:
+                ethers.utils.formatEther(
+                    revenue
+                ),
+
+            totalRewardsPaid:
+                ethers.utils.formatEther(
+                    rewards
+                ),
+
+            totalBurnedGPVLT:
+                burned.toString()
+        });
+
+    } catch(err){
+
+        res.status(500).json({
+
+            success:false,
+
+            error:err.message
+        });
+    }
+});
+
+/* =========================================================
+   PVLT BALANCE
+========================================================= */
+
+app.get("/pvlt/:address",
+async (req,res) => {
+
+    try{
+
+        const address =
+            req.params.address;
+
+        const balance =
+            await pvltContract.balanceOf(
+                address
+            );
+
+        res.json({
+
+            success:true,
+
+            balance:
+                ethers.utils.formatEther(
+                    balance
+                )
+        });
+
+    } catch(err){
+
+        res.status(500).json({
+
+            success:false,
+
+            error:err.message
+        });
+    }
+});
+
+/* =========================================================
+   OWNER WITHDRAW
+========================================================= */
+
+app.post("/owner/withdraw",
+async (req,res) => {
+
+    try{
+
+        const amount =
+            req.body.amount;
+
+        const wei =
+            ethers.utils.parseEther(
+                amount
+            );
+
+        const tx =
+            await treasuryContract
+            .ownerWithdraw(wei);
+
+        await tx.wait();
+
+        res.json({
+
+            success:true,
+
+            hash:tx.hash,
+
+            message:
+                "Treasury withdrawal successful"
+        });
+
+    } catch(err){
+
+        res.status(500).json({
+
+            success:false,
+
+            error:err.message
+        });
+    }
+});
+
+/* =========================================================
+   EMERGENCY WITHDRAW ALL
+========================================================= */
+
+app.post("/owner/emergency-withdraw",
+async (req,res) => {
+
+    try{
+
+        const tx =
+            await treasuryContract
+            .emergencyWithdrawAll();
+
+        await tx.wait();
+
+        res.json({
+
+            success:true,
+
+            hash:tx.hash,
+
+            message:
+                "Emergency withdrawal completed"
+        });
+
+    } catch(err){
+
+        res.status(500).json({
+
+            success:false,
+
+            error:err.message
+        });
+    }
+});
+
+/* =========================================================
+   SERVER
+========================================================= */
+
+app.listen(PORT, () => {
+
+    console.log(
+        `PEPEVOLT SERVER RUNNING ON PORT ${PORT}`
+    );
+});
