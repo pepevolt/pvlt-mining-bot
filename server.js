@@ -1,132 +1,99 @@
+require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
-const dotenv = require('dotenv');
-
-dotenv.config();
+const { ethers } = require('ethers');
 
 const app = express();
-const PORT = process.env.PORT || 3001;
-
-app.use(cors());
+app.use(cors({ origin: 'https://pepevolt.github.io' })); // Restrict to your frontend
 app.use(express.json());
 
-// In-memory storage
-const users = new Map();
+// In-memory storage (use Redis/Postgres for production)
+const userProgress = new Map(); // address -> { taps, lastTapTime, claimed }
 
-const MAX_ENERGY = 10000;
-const INITIAL_ENERGY = 50;
-const ENERGY_REGEN_INTERVAL = 3;
-const POINTS_TO_GPVLT_RATE = 100;
+const SIGNER_PRIVATE_KEY = process.env.PRIVATE_KEY;
+const CONTRACT_ADDRESS = process.env.CONTRACT_ADDRESS;
+const REWARD_AMOUNT = ethers.parseEther("10"); // 10 PVLT per full taps
 
-function getUserData(wallet) {
-  if (!users.has(wallet)) {
-    users.set(wallet, {
-      points: 0,
-      energy: INITIAL_ENERGY,
-      gpvlt: 0,
-      lastRegen: Date.now(),
-      lastTap: 0
-    });
-  }
-  return users.get(wallet);
-}
-
-function updateEnergy(user) {
-  const now = Date.now();
-  const timePassed = Math.floor((now - user.lastRegen) / 1000);
-  const energyGain = Math.floor(timePassed / ENERGY_REGEN_INTERVAL);
-  
-  if (energyGain > 0) {
-    user.energy = Math.min(user.energy + energyGain, MAX_ENERGY);
-    user.lastRegen = now;
-  }
-  return user.energy;
-}
-
-function autoConvertPoints(user) {
-  let converted = 0;
-  while (user.points >= POINTS_TO_GPVLT_RATE) {
-    user.points -= POINTS_TO_GPVLT_RATE;
-    user.gpvlt += 1;
-    converted++;
-  }
-  return converted;
-}
-
-app.get('/', (req, res) => {
-  res.json({ message: 'PepeVolt API Running!', status: 'online' });
-});
-
-app.post('/user', (req, res) => {
-  try {
-    const { wallet } = req.body;
-    if (!wallet) return res.status(400).json({ error: 'Wallet required' });
-    
-    const user = getUserData(wallet);
-    updateEnergy(user);
-    
-    res.json({
-      points: user.points,
-      energy: user.energy,
-      gpvlt: user.gpvlt
-    });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-app.post('/tap', (req, res) => {
-  try {
-    const { wallet } = req.body;
-    if (!wallet) return res.status(400).json({ error: 'Wallet required' });
-    
-    const user = getUserData(wallet);
-    updateEnergy(user);
-    
+// Helper: Anti-cheat validation
+function validateTap(address, timestamp, lastTap) {
     const now = Date.now();
-    if (now - user.lastTap < 100) {
-      return res.status(429).json({ error: 'Tap too fast!' });
+    // Rule 1: Min 100ms between taps
+    if (now - lastTap.lastTapTime < 100) return false;
+    // Rule 2: Max 10 taps per second
+    const oneSecAgo = now - 1000;
+    let tapsInLastSec = 0;
+    if (lastTap.timestamps) {
+        tapsInLastSec = lastTap.timestamps.filter(t => t > oneSecAgo).length;
     }
-    user.lastTap = now;
+    if (tapsInLastSec >= 10) return false;
+    return true;
+}
+
+// Endpoint: Get user progress
+app.get('/progress/:address', (req, res) => {
+    const address = req.params.address;
+    if (!userProgress.has(address)) {
+        userProgress.set(address, { taps: 0, claimed: false, lastTapTime: 0, timestamps: [] });
+    }
+    res.json({ taps: userProgress.get(address).taps });
+});
+
+// Endpoint: Register a tap with anti-cheat
+app.post('/tap', (req, res) => {
+    const { address, timestamp } = req.body;
+    if (!address) return res.status(400).json({ error: 'Invalid address' });
     
-    if (user.energy <= 0) {
-      return res.status(400).json({ error: 'Not enough energy!' });
+    if (!userProgress.has(address)) {
+        userProgress.set(address, { taps: 0, claimed: false, lastTapTime: 0, timestamps: [] });
     }
     
-    user.energy--;
-    user.points++;
-    const converted = autoConvertPoints(user);
+    const user = userProgress.get(address);
+    if (user.claimed) return res.status(400).json({ error: 'Already claimed reward' });
+    if (user.taps >= 50) return res.status(400).json({ error: 'Max taps reached' });
     
-    res.json({
-      points: user.points,
-      energy: user.energy,
-      gpvlt: user.gpvlt,
-      converted
+    if (!validateTap(address, timestamp, user)) {
+        return res.status(403).json({ error: 'Cheating detected! Tap invalid.' });
+    }
+    
+    user.taps++;
+    user.lastTapTime = timestamp;
+    user.timestamps.push(timestamp);
+    if (user.timestamps.length > 10) user.timestamps.shift();
+    userProgress.set(address, user);
+    
+    res.json({ taps: user.taps, canClaim: user.taps >= 50 });
+});
+
+// Endpoint: Generate claim voucher (server-signs the reward)
+app.post('/claim', async (req, res) => {
+    const { address } = req.body;
+    if (!userProgress.has(address)) {
+        return res.status(400).json({ error: 'No taps found' });
+    }
+    
+    const user = userProgress.get(address);
+    if (user.claimed) return res.status(400).json({ error: 'Already claimed' });
+    if (user.taps < 50) return res.status(400).json({ error: `Only ${user.taps}/50 taps` });
+    
+    // Mark as claimed to prevent double claims
+    user.claimed = true;
+    userProgress.set(address, user);
+    
+    // Create signed voucher
+    const signer = new ethers.Wallet(SIGNER_PRIVATE_KEY);
+    const message = ethers.solidityPackedKeccak256(
+        ['address', 'uint256', 'uint256'],
+        [address, REWARD_AMOUNT, Math.floor(Date.now() / 1000)]
+    );
+    const signature = await signer.signMessage(ethers.getBytes(message));
+    
+    // In real contract, you'd verify this signature
+    res.json({ 
+        amount: REWARD_AMOUNT.toString(),
+        signature: signature,
+        voucher: message
     });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
 });
 
-app.post('/refill', (req, res) => {
-  try {
-    const { wallet } = req.body;
-    if (!wallet) return res.status(400).json({ error: 'Wallet required' });
-    
-    const user = getUserData(wallet);
-    user.energy = Math.min(user.energy + 10000, MAX_ENERGY);
-    user.lastRegen = Date.now();
-    
-    res.json({ energy: user.energy });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-app.get('/health', (req, res) => {
-  res.json({ status: 'healthy', users: users.size });
-});
-
-app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-});
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
